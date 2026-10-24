@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Orbit Flow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one full-screen WebGL canvas; HUD pinned to the four corners; crosshair dead centre; overlay for start / pause / finish.
+   Single deliberate dark look: an industrial test chamber in a void, cyan grid, violet structure, amber gates. */
+:root {
+  --void: #04050c;
+  --ink: #e6f3ff;
+  --dim: #7d8aa6;
+  --cyan: #2ef2ff;
+  --magenta: #ff3d9a;
+  --amber: #ffc24a;
+  --panel: rgba(4, 7, 18, 0.72);
+  --line: rgba(46, 242, 255, 0.28);
+  --display: "Chakra Petch", "Arial Narrow", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Consolas", monospace;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--void); color: var(--ink); font-family: var(--mono); overflow: hidden; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+#view { position: fixed; inset: 0; }
+#view canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+/* ---------- HUD ---------- */
+.hud { position: fixed; pointer-events: none; font-variant-numeric: tabular-nums; }
+.hud-tl { top: calc(14px + env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 6px; justify-items: start; }
+.hud-tr { top: calc(14px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 6px; justify-items: end; }
+.hud-bl { bottom: calc(14px + env(safe-area-inset-bottom, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 6px; }
+.hud-br { bottom: calc(14px + env(safe-area-inset-bottom, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); text-align: right; }
+.tag { background: var(--panel); border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+.tag b { color: var(--ink); font-weight: 600; }
+.tag b.tethered { color: var(--magenta); }
+.tag b.grounded { color: var(--cyan); }
+.speed { font-family: var(--display); font-weight: 700; font-size: 60px; line-height: 0.88; color: var(--cyan); text-shadow: 0 0 18px rgba(46, 242, 255, 0.55); }
+.speed small { font-family: var(--mono); font-size: 13px; font-weight: 400; color: var(--dim); margin-left: 6px; letter-spacing: 0.1em; }
+.speedbar { width: 220px; max-width: 46vw; height: 3px; background: rgba(46, 242, 255, 0.15); }
+.speedbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--cyan), var(--amber)); box-shadow: 0 0 10px var(--cyan); }
+.timer { font-family: var(--display); font-weight: 700; font-size: 38px; line-height: 1; color: var(--amber); text-shadow: 0 0 14px rgba(255, 194, 74, 0.45); }
+.chamber { font-size: 11px; letter-spacing: 0.22em; color: var(--magenta); text-transform: uppercase; }
+.hint { font-size: 12px; color: var(--dim); letter-spacing: 0.04em; }
+
+.crosshair { position: fixed; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; pointer-events: none; }
+.crosshair .tick { position: absolute; background: var(--ink); opacity: 0.7; }
+.crosshair .t1 { left: 14px; top: 0; width: 2px; height: 9px; }
+.crosshair .t2 { left: 14px; bottom: 0; width: 2px; height: 9px; }
+.crosshair .t3 { top: 14px; left: 0; height: 2px; width: 9px; }
+.crosshair .t4 { top: 14px; right: 0; height: 2px; width: 9px; }
+.crosshair .dot { position: absolute; left: 13px; top: 13px; width: 4px; height: 4px; border-radius: 50%; background: var(--ink); }
+.crosshair.lock .tick, .crosshair.lock .dot { background: var(--cyan); opacity: 1; box-shadow: 0 0 8px var(--cyan); }
+.crosshair.miss .tick, .crosshair.miss .dot { background: var(--magenta); opacity: 1; }
+.range { position: fixed; left: 50%; top: calc(50% + 22px); transform: translateX(-50%); font-size: 11px; letter-spacing: 0.12em; color: var(--cyan); pointer-events: none; font-variant-numeric: tabular-nums; }
+
+.toast { position: fixed; left: 50%; top: 30%; transform: translate(-50%, -50%); font-family: var(--display); font-weight: 700; font-size: clamp(22px, 4vw, 34px); letter-spacing: 0.2em; color: var(--amber); text-shadow: 0 0 20px rgba(255, 194, 74, 0.6); pointer-events: none; opacity: 0; transition: opacity 0.5s; white-space: nowrap; }
+.toast.on { opacity: 1; transition: none; }
+
+/* ---------- Overlay ---------- */
+.overlay {
+  position: fixed; inset: 0; display: grid; place-items: center; cursor: pointer; overflow-y: auto; touch-action: pan-y;
+  padding-block: 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: radial-gradient(ellipse at 50% 45%, rgba(8, 12, 32, 0.72), rgba(4, 5, 12, 0.95));
+}
+.panel { max-width: 36rem; display: grid; gap: 16px; }
+.eyebrow { font-size: 12px; letter-spacing: 0.24em; color: var(--magenta); text-transform: uppercase; }
+.panel h1 { margin: 0; font-family: var(--display); font-weight: 700; font-size: clamp(52px, 12vw, 104px); line-height: 0.85; letter-spacing: -0.01em; text-wrap: balance; }
+.panel h1 span { color: var(--cyan); text-shadow: 0 0 26px rgba(46, 242, 255, 0.5); }
+.panel h1.time { color: var(--amber); text-shadow: 0 0 26px rgba(255, 194, 74, 0.45); font-variant-numeric: tabular-nums; }
+.panel p { margin: 0; color: var(--dim); font-size: 14px; line-height: 1.6; max-width: 62ch; }
+.panel p strong { color: var(--ink); font-weight: 600; }
+.controls { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; }
+.controls kbd { font-family: var(--mono); color: var(--cyan); border: 1px solid var(--line); padding: 1px 7px; white-space: nowrap; justify-self: start; }
+.controls span { color: var(--dim); }
+.splits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.splits div { border: 1px solid var(--line); padding: 6px 8px; color: var(--dim); }
+.splits b { display: block; color: var(--ink); font-size: 14px; }
+.go { font-family: var(--display); font-weight: 700; font-size: 18px; letter-spacing: 0.18em; color: var(--void); background: var(--cyan); padding: 12px 22px; justify-self: start; box-shadow: 0 0 28px rgba(46, 242, 255, 0.45); }
+.ctlwrap { display: grid; gap: 10px; }
+.tc-note { color: var(--amber) !important; font-size: 13px !important; }
+.touch .controls.kb { display: none; }
+body:not(.touch) .controls.tc, body:not(.touch) .tc-note { display: none; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.ghost { font: 700 15px var(--display); letter-spacing: 0.14em; color: var(--ink); background: transparent; border: 1px solid var(--line); padding: 12px 18px; cursor: pointer; }
+.ghost:focus-visible, .pausebtn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* ---------- Touch controls (iPad, tablets, phones) ---------- */
+.pausebtn, .movezone, .tbtns { display: none; }
+.touch .pausebtn, .touch .movezone, .touch .tbtns { display: block; }
+.touch .hud-bl, .touch .hud-br { display: none; }
+.pausebtn {
+  position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%);
+  width: 48px; height: 48px; border-radius: 50%; background: var(--panel); border: 1px solid var(--line);
+  color: var(--ink); font: 700 15px var(--display); letter-spacing: 0.1em; touch-action: manipulation; cursor: pointer;
+}
+.movezone { position: fixed; left: 0; bottom: 0; width: 42vw; height: 60vh; touch-action: none; }
+.stickbase {
+  position: fixed; left: calc(max(16px, env(safe-area-inset-left, 0px)) + 78px); top: calc(100% - 96px - env(safe-area-inset-bottom, 0px));
+  width: 140px; height: 140px; margin: -70px 0 0 -70px; border-radius: 50%;
+  border: 2px solid rgba(46, 242, 255, 0.35); background: rgba(46, 242, 255, 0.06); pointer-events: none; opacity: 0.6;
+}
+.stickbase.active { opacity: 1; }
+.stickknob {
+  position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px; border-radius: 50%;
+  background: rgba(46, 242, 255, 0.3); border: 2px solid var(--cyan); box-shadow: 0 0 14px rgba(46, 242, 255, 0.5);
+}
+.tbtns { position: fixed; right: max(18px, env(safe-area-inset-right, 0px)); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); width: 236px; height: 236px; pointer-events: none; }
+.tb {
+  position: absolute; border-radius: 50%; pointer-events: auto; touch-action: none; padding: 0;
+  font: 700 13px var(--display); letter-spacing: 0.12em; color: var(--ink);
+  background: rgba(4, 7, 18, 0.55); border: 2px solid var(--line);
+}
+.tb.on { transform: scale(0.93); background: rgba(46, 242, 255, 0.28); }
+.tb.snap { right: 0; bottom: 34px; width: 108px; height: 108px; font-size: 17px; border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 18px rgba(46, 242, 255, 0.3); }
+.tb.snap.ready { background: rgba(46, 242, 255, 0.2); box-shadow: 0 0 28px rgba(46, 242, 255, 0.65); }
+.tb.jump { right: 120px; bottom: 0; width: 88px; height: 88px; }
+.tb.tether { right: 124px; bottom: 102px; width: 76px; height: 76px; border-color: var(--magenta); color: var(--magenta); }
+.tb.tether.on { background: rgba(255, 61, 154, 0.3); }
+.tb.sprint { right: 24px; bottom: 156px; width: 64px; height: 64px; font-size: 12px; }
+.tb.sprint.lit { border-color: var(--amber); color: var(--void); background: var(--amber); }
+@media (prefers-reduced-motion: reduce) { .tb.on { transform: none; } }
+@media (max-width: 520px) { .speed { font-size: 42px; } .timer { font-size: 26px; } .splits { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+</style>
+
+</head>
+<body>
+<div id="view"></div>
+
+<div class="hud hud-tl">
+  <div class="speed"><span id="speed">0.0</span><small>M/S</small></div>
+  <div class="speedbar"><i id="speedbar"></i></div>
+  <div class="tag">Gravity <b id="gdir">−Y</b> · State <b id="state">AIRBORNE</b></div>
+</div>
+<div class="hud hud-tr">
+  <div class="chamber" id="chamber">Chamber 01 · The Drop</div>
+  <div class="timer" id="timer">00:00.00</div>
+  <div class="tag">Gate <b id="gates">0/6</b> · Next <b id="next">--</b></div>
+  <div class="tag">Best <b id="best">--</b> · Falls <b id="falls">0</b></div>
+</div>
+<div class="hud hud-bl hint">LMB / E snap · RMB / Q tether (hold) · Space jump · Shift sprint</div>
+<div class="hud hud-br hint">R restart · Esc pause</div>
+
+<button class="pausebtn" id="pausebtn" type="button" aria-label="Pause">II</button>
+<div class="movezone" id="movezone" aria-hidden="true"><div class="stickbase" id="stickbase"><div class="stickknob" id="stickknob"></div></div></div>
+<div class="tbtns" id="tbtns" aria-hidden="true">
+  <button type="button" class="tb snap" data-act="snap">SNAP</button>
+  <button type="button" class="tb jump" data-act="jump">JUMP</button>
+  <button type="button" class="tb tether" data-act="tether">TETHER</button>
+  <button type="button" class="tb sprint" data-act="sprint">RUN</button>
+</div>
+
+<div class="crosshair" id="crosshair"><i class="tick t1"></i><i class="tick t2"></i><i class="tick t3"></i><i class="tick t4"></i><i class="dot"></i></div>
+<div class="range" id="range"></div>
+<div class="toast" id="toast"></div>
+
+<div class="overlay" id="overlay">
+  <div class="panel">
+    <div class="eyebrow" id="eyebrow">Momentum speedrun · Chambers 01 + 02</div>
+    <h1 id="headline">Orbit <span>Flow</span></h1>
+    <p id="blurb">Step off the ledge and fall. Aim at any surface within 45 m and <strong>snap your gravity onto it</strong>: every bit of your fall speed turns into a sprint along the new floor. Drop the shaft, run the side wall across the chasm, flip onto the ceiling, and clear <strong>six gates in order</strong>.</p>
+    <div class="ctlwrap" id="controls">
+      <div class="controls kb">
+      <kbd>Mouse</kbd><span>Look (click to lock the mouse)</span>
+      <kbd>W A S D</kbd><span>Move</span>
+      <kbd>Shift</kbd><span>Sprint</span>
+      <kbd>Space</kbd><span>Jump (or let go of the tether)</span>
+      <kbd>Left click / E</kbd><span>Gravity snap to the surface under the crosshair</span>
+      <kbd>Right click / Q</kbd><span>Hold to tether and swing</span>
+      <kbd>R</kbd><span>Restart the run</span>
+      </div>
+      <div class="controls tc">
+        <kbd>Left side</kbd><span>Touch and drag to move</span>
+        <kbd>Anywhere else</kbd><span>Drag to look around</span>
+        <kbd>SNAP</kbd><span>Gravity snap to the surface under the crosshair</span>
+        <kbd>JUMP</kbd><span>Jump (or let go of the tether)</span>
+        <kbd>TETHER</kbd><span>Hold to swing</span>
+        <kbd>RUN</kbd><span>Tap to turn sprint on or off</span>
+        <kbd>II</kbd><span>Pause, resume or restart</span>
+      </div>
+      <p class="tc-note">Best played with the iPad turned sideways.</p>
+    </div>
+    <div class="splits" id="splits" hidden></div>
+    <div class="actions">
+      <div class="go" id="go">Click to play</div>
+      <button type="button" class="ghost" id="restartBtn" hidden>Restart run</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  if (!window.THREE) {
+    $("blurb").textContent = "Three.js could not load. Check your internet connection and refresh the page.";
+    $("controls").hidden = true; $("go").hidden = true;
+    return;
+  }
+
+  // ===========================================================================
+  // 0. CONFIG — every tuning value in one place
+  // ===========================================================================
+  const CFG = {
+    gravity: 9.8, gravityScale: 2.2,          // gravity vector magnitude × scale
+    radius: 0.6, eyeHeight: 0.6,
+    runSpeed: 11, sprintSpeed: 18,
+    groundAccel: 90, groundFriction: 70, groundMomentumDecay: 2.5, groundSteer: 7,
+    airAccel: 26, airMomentumDecay: 0, airSteer: 2.5,
+    jumpSpeed: 9, coyoteTime: 0.12, jumpBuffer: 0.12,
+    terminalSpeed: 90,
+    snapRange: 45, snapCooldown: 0.15, minSnapAngle: 0.08,
+    snapSpeedFloor: 20,                      // a snap only ever adds speed up to this floor, never removes any
+    tetherRange: 45, tetherMinLength: 3, tetherSwingAccel: 16, tetherCorrection: 12, tetherReleaseBoost: 0.6,
+    cameraSettle: 0.25,                      // seconds for the world-tilt to settle after a snap
+    mouseSens: 0.0021, touchLookSens: 0.0055, maxPitch: 1.55,
+    fovBase: 75, fovMax: 95, fovFullSpeed: 70,
+    shakeDecay: 9,
+    fixedDt: 1 / 240, maxSteps: 30
+  };
+
+  // ===========================================================================
+  // 1. RENDERER, SCENE, CAMERA RIG, POST-PROCESSING
+  // ===========================================================================
+  // Touch devices (iPad, tablets, phones) get on-screen controls and a lighter render resolution.
+  const TOUCH = (navigator.maxTouchPoints || 0) > 1 || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  if (TOUCH) document.body.classList.add("touch");
+  const TAP = () => (document.body.classList.contains("touch") ? "Tap" : "Click");
+
+  const FOG = new THREE.Color(0x04050c);
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, TOUCH ? 1.5 : 2));
+  $("view").appendChild(renderer.domElement);
+  const canvas = renderer.domElement;
+
+  const scene = new THREE.Scene();
+  scene.background = FOG;
+
+  // The rig carries the view orientation; the camera inside it only carries the impact shake.
+  const rig = new THREE.Object3D();
+  scene.add(rig);
+  const camera = new THREE.PerspectiveCamera(CFG.fovBase, 1, 0.05, 900);
+  rig.add(camera);
+
+  // Post-processing: bloom for the neon glow, then a speed pass (vignette, radial blur, chromatic split).
+  const SpeedShader = {
+    uniforms: { tDiffuse: { value: null }, uSpeed: { value: 0 }, uImpact: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform sampler2D tDiffuse; uniform float uSpeed; uniform float uImpact; varying vec2 vUv;
+      void main() {
+        vec2 c = vUv - 0.5; float r = length(c);
+        vec2 dir = c / max(r, 0.0001);
+        float split = (uSpeed * 0.006 + uImpact * 0.014) * r;
+        vec3 col = vec3(texture2D(tDiffuse, vUv + dir * split).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - dir * split).b);
+        vec3 blur = col;
+        float k = uSpeed * 0.022;
+        for (int i = 1; i < 6; i++) { blur += texture2D(tDiffuse, vUv - c * k * float(i)).rgb; }
+        blur /= 6.0;
+        col = mix(col, blur, clamp(uSpeed, 0.0, 1.0) * smoothstep(0.12, 0.55, r));
+        float vig = 1.0 - smoothstep(0.32 - uSpeed * 0.1, 0.86, r);
+        col *= mix(1.0, vig, 0.55 + uSpeed * 0.35);
+        col += vec3(0.18, 0.95, 1.0) * uImpact * 0.16 * smoothstep(0.25, 0.75, r);
+        gl_FragColor = vec4(col, 1.0);
+      }`
+  };
+  let composer = null, speedPass = null, bloomPass = null;
+  if (THREE.EffectComposer && THREE.RenderPass && THREE.ShaderPass && THREE.UnrealBloomPass) {
+    composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.1, 0.55, 0.2);
+    composer.addPass(bloomPass);
+    speedPass = new THREE.ShaderPass(SpeedShader);
+    composer.addPass(speedPass);
+  }
+
+  function resize() {
+    const w = window.innerWidth, h = Math.max(1, window.innerHeight);
+    renderer.setSize(w, h, false);
+    if (composer) composer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ===========================================================================
+  // 2. MATERIALS — world-space neon grid with flowing data streaks
+  // ===========================================================================
+  const gridMaterials = [];
+  const gridVertex = `
+    varying vec3 vWorldPos; varying vec3 vNormal; varying float vDist;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      vNormal = normalize(mat3(modelMatrix) * normal);
+      vec4 mv = viewMatrix * wp;
+      vDist = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`;
+  const gridFragment = `
+    uniform vec3 uBase; uniform vec3 uLine; uniform vec3 uFlow; uniform vec3 uFog;
+    uniform float uCell; uniform float uGlow; uniform float uFogNear; uniform float uFogFar;
+    uniform float uHover; uniform float uTime; uniform float uSpeed;
+    varying vec3 vWorldPos; varying vec3 vNormal; varying float vDist;
+    float hash(float n) { return fract(sin(n) * 43758.5453); }
+    float gridLine(vec2 uv) {
+      vec2 g = abs(fract(uv - 0.5) - 0.5) / max(fwidth(uv), vec2(0.0001));
+      return 1.0 - min(min(g.x, g.y), 1.0);
+    }
+    void main() {
+      vec3 n = abs(vNormal);
+      vec2 uv = n.y > 0.5 ? vWorldPos.xz : (n.x > 0.5 ? vWorldPos.zy : vWorldPos.xy);
+      vec2 cuv = uv / uCell;
+      float minor = gridLine(cuv);
+      float major = gridLine(cuv / 4.0);
+
+      // Flowing data streaks along the major lines; they race faster as the player goes faster.
+      vec2 m = cuv / 4.0;
+      vec2 gm = abs(fract(m - 0.5) - 0.5) / max(fwidth(m), vec2(0.0001));
+      float laneA = 1.0 - min(gm.x, 1.0);
+      float laneB = 1.0 - min(gm.y, 1.0);
+      float rate = 0.35 + uSpeed * 2.2;
+      float pA = fract(m.y * 0.35 - uTime * rate + hash(floor(m.x + 0.5)) * 9.0);
+      float pB = fract(m.x * 0.35 + uTime * rate * 0.8 + hash(floor(m.y + 0.5) + 17.0) * 9.0);
+      float dashA = smoothstep(0.0, 0.04, pA) * (1.0 - smoothstep(0.04, 0.32, pA));
+      float dashB = smoothstep(0.0, 0.04, pB) * (1.0 - smoothstep(0.04, 0.32, pB));
+      float flow = laneA * dashA + laneB * dashB * 0.6;
+
+      float light = 0.4 + 0.6 * max(dot(normalize(vNormal), normalize(vec3(0.35, 1.0, 0.55))), 0.0);
+      vec3 col = uBase * light;
+      col += uLine * (minor * 0.2 + major * 0.8) * (uGlow + uHover * 0.9);
+      col += uFlow * flow * (0.9 + uSpeed * 1.6);
+      col += uLine * uHover * 0.07;
+      float fog = smoothstep(uFogNear, uFogFar, vDist);
+      gl_FragColor = vec4(mix(col, uFog, fog), 1.0);
+    }`;
+  function gridMaterial(base, line, flow, cell, glow) {
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: gridVertex, fragmentShader: gridFragment,
+      extensions: { derivatives: true },
+      uniforms: {
+        uBase: { value: new THREE.Color(base) }, uLine: { value: new THREE.Color(line) }, uFlow: { value: new THREE.Color(flow) },
+        uFog: { value: FOG }, uCell: { value: cell }, uGlow: { value: glow },
+        uFogNear: { value: 90 }, uFogFar: { value: 340 },
+        uHover: { value: 0 }, uTime: { value: 0 }, uSpeed: { value: 0 }
+      }
+    });
+    gridMaterials.push(mat);
+    return mat;
+  }
+  const PALETTE = {
+    wall:    { base: 0x0a0b1c, line: 0x7a5cff, flow: 0x2ef2ff, cell: 2, glow: 0.8, edge: 0x9c86ff },
+    run:     { base: 0x05121c, line: 0x2ef2ff, flow: 0xffffff, cell: 2, glow: 1.0, edge: 0x2ef2ff },
+    ceiling: { base: 0x140e06, line: 0xffc24a, flow: 0xffffff, cell: 2, glow: 0.9, edge: 0xffc24a },
+    runway:  { base: 0x05121c, line: 0x2ef2ff, flow: 0xffc24a, cell: 2, glow: 1.0, edge: 0x2ef2ff },
+    cube:    { base: 0x140818, line: 0xff3d9a, flow: 0xffc24a, cell: 1, glow: 0.85, edge: 0xff6fb5 },
+    abyss:   { base: 0x02030a, line: 0x1d6fff, flow: 0x2ef2ff, cell: 8, glow: 0.5, edge: 0x1d6fff },
+    skyline: { base: 0x06071a, line: 0x2a2f70, flow: 0x5a48d8, cell: 4, glow: 0.6, edge: 0x3a3fa0 }
+  };
+
+  // ===========================================================================
+  // 3. LEVEL — Chamber 01 (The Drop) + Chamber 02 (Inversion)
+  //    Every collider is an axis-aligned box, so sphere collision is exact.
+  // ===========================================================================
+  const solids = [];
+  const solidMeshes = [];
+  function addBox(cx, cy, cz, sx, sy, sz, kind, solid = true) {
+    const p = PALETTE[kind];
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), gridMaterial(p.base, p.line, p.flow, p.cell, p.glow));
+    mesh.position.set(cx, cy, cz);
+    scene.add(mesh);
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),
+      new THREE.LineBasicMaterial({ color: p.edge, transparent: true, opacity: solid ? 0.95 : 0.4 }));
+    mesh.add(edges);
+    if (solid) {
+      const half = new THREE.Vector3(sx / 2, sy / 2, sz / 2);
+      solids.push({ min: mesh.position.clone().sub(half), max: mesh.position.clone().add(half) });
+      solidMeshes.push(mesh);
+    }
+    return mesh;
+  }
+
+  // Chamber 01 — The Drop
+  addBox(0, 29, 8, 48, 142, 6, "wall");          // spawn tower; its top (y = 100) is the start ledge
+  addBox(-22, 20, -98, 4, 120, 212, "run");       // the long side wall across the chasm (inner face x = -20)
+  addBox(22, 40, -18, 4, 80, 46, "wall");         // short right wall of the shaft
+  // Chamber 02 — Inversion: a tube you loop through (wall → ceiling → end wall → floor)
+  addBox(0, 52, -280, 60, 4, 160, "ceiling");     // ceiling (underside y = 50)
+  addBox(0, 4, -280, 60, 4, 160, "runway");       // floor (top y = 6)
+  addBox(0, 30, -362, 60, 48, 4, "wall");         // end wall (inner face z = -360)
+  // Debris in the chasm: optional surfaces for alternate lines
+  [
+    [12, 50, -60, 6], [30, 30, -95, 8], [8, 14, -122, 5], [40, 55, -150, 10],
+    [18, 72, -30, 5], [36, 10, -40, 6], [24, 28, -250, 6], [12, 20, -320, 5]
+  ].forEach(([x, y, z, s]) => addBox(x, y, z, s, s, s, "cube"));
+
+  // Non-solid scenery: abyss grid far below, distant skyline for scale
+  (function scenery() {
+    const abyss = new THREE.Mesh(new THREE.PlaneGeometry(1400, 1400), gridMaterial(PALETTE.abyss.base, PALETTE.abyss.line, PALETTE.abyss.flow, 8, 0.5));
+    abyss.rotation.x = -Math.PI / 2;
+    abyss.position.set(0, -95, -150);
+    scene.add(abyss);
+    let seed = 11;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 34; i++) {
+      const side = i % 2 ? 1 : -1;
+      const x = side * (110 + rnd() * 120), z = 60 - rnd() * 480;
+      const w = 8 + rnd() * 18, h = 60 + rnd() * 170;
+      addBox(x, -95 + h / 2, z, w, h, w, "skyline", false);
+    }
+    const n = 1400, arr = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { arr[i * 3] = (rnd() - 0.5) * 260; arr[i * 3 + 1] = rnd() * 180 - 60; arr[i * 3 + 2] = 40 - rnd() * 380; }
+    const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(arr, 3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x7ff3ff, size: 0.16, transparent: true, opacity: 0.6, depthWrite: false })));
+  })();
+
+  // Holographic gates. axis = the direction you fly through them.
+  const GATE_DEFS = [
+    { pos: [0, 70, -12],       axis: "y", r: 4.5 },   // 1  mid-shaft
+    { pos: [-3, 36, -21],      axis: "y", r: 4.5 },   // 2  bottom of the drop: snap to the left wall now
+    { pos: [-17, 31, -85],     axis: "z", r: 4.5 },   // 3  side wall, over the chasm
+    { pos: [-17, 31, -150],    axis: "z", r: 4.5 },   // 4  side wall, far end: snap up to the ceiling next
+    { pos: [-17.5, 46.5, -290], axis: "z", r: 4.5 },  // 5  upside down on the ceiling
+    { pos: [-17.5, 9.5, -318], axis: "z", r: 5 }      // 6  down the end wall and back out along the floor
+  ];
+  const gateDiscShader = {
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform float uTime; uniform float uOpacity; varying vec2 vUv;
+      void main() {
+        float r = length(vUv - 0.5) * 2.0;
+        float rim = smoothstep(0.55, 1.0, r) * (1.0 - smoothstep(0.98, 1.0, r));
+        float scan = 0.5 + 0.5 * sin((vUv.y * 60.0) - uTime * 6.0);
+        float ripple = 0.5 + 0.5 * sin(r * 22.0 - uTime * 5.0);
+        float a = (rim * 0.75 + scan * 0.06 + ripple * 0.05) * (1.0 - smoothstep(0.98, 1.0, r));
+        gl_FragColor = vec4(uColor, a * uOpacity);
+      }`
+  };
+  function numberSprite(n) {
+    const c = document.createElement("canvas"); c.width = c.height = 128;
+    const g = c.getContext("2d");
+    g.fillStyle = "#ffffff"; g.font = "700 64px 'Chakra Petch', Arial, sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(String(n).padStart(2, "0"), 64, 68);
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    s.scale.set(2.6, 2.6, 1);
+    return s;
+  }
+  const gates = GATE_DEFS.map((d, i) => {
+    const group = new THREE.Group();
+    group.position.set(d.pos[0], d.pos[1], d.pos[2]);
+    if (d.axis === "y") group.rotation.x = Math.PI / 2;
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffc24a, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(d.r, 0.14, 12, 64), ringMat);
+    const ring2 = new THREE.Mesh(new THREE.TorusGeometry(d.r * 0.86, 0.04, 8, 64), ringMat);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(d.r, 48), new THREE.ShaderMaterial({
+      vertexShader: gateDiscShader.vertexShader, fragmentShader: gateDiscShader.fragmentShader,
+      uniforms: { uColor: { value: new THREE.Color(0xffc24a) }, uTime: { value: 0 }, uOpacity: { value: 1 } },
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+    }));
+    const label = numberSprite(i + 1);
+    group.add(ring, ring2, disc, label);
+    scene.add(group);
+    return { group, ring, ring2, disc, label, ringMat, pos: group.position.clone(), r: d.r };
+  });
+
+  // Tether rope
+  const ropeGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const rope = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xff3d9a }));
+  rope.frustumCulled = false; rope.visible = false; scene.add(rope);
+  const anchorMark = new THREE.Mesh(new THREE.OctahedronGeometry(0.35), new THREE.MeshBasicMaterial({ color: 0xff3d9a }));
+  anchorMark.visible = false; scene.add(anchorMark);
+
+  // ===========================================================================
+  // 4. PLAYER STATE — custom vector-math physics
+  // ===========================================================================
+  const SPAWN = new THREE.Vector3(0, 100 + CFG.radius + 0.01, 8);
+  const player = {
+    gravity: new THREE.Vector3(0, -CFG.gravity, 0),   // personal gravity vector (dynamic)
+    position: SPAWN.clone(),
+    velocity: new THREE.Vector3(),
+    body: new THREE.Quaternion(),                      // local +Y is always "up" (= -gravity)
+    pitch: 0,
+    grounded: false,
+    coyote: 0, jumpBuffer: 0, snapCooldown: 0,
+    tether: { active: false, anchor: new THREE.Vector3(), length: 0, centrifugal: 0 }
+  };
+  const viewOffset = new THREE.Quaternion();          // world-space tilt still being smoothed out
+  const shake = { amp: 0, t: 0 };
+  let impact = 0;
+  let checkpoint = null;
+
+  // Scratch objects so the hot loop never allocates
+  const V1 = new THREE.Vector3(), V2 = new THREE.Vector3(), V3 = new THREE.Vector3(), V4 = new THREE.Vector3();
+  const Q1 = new THREE.Quaternion(), Q2 = new THREE.Quaternion(), IDENTITY = new THREE.Quaternion();
+  const AX_X = new THREE.Vector3(1, 0, 0), AX_Y = new THREE.Vector3(0, 1, 0), AX_NZ = new THREE.Vector3(0, 0, -1);
+  const getUp = out => out.copy(player.gravity).normalize().negate();
+
+  // Shortest rotation between two unit vectors. A 180° flip turns around the body's right axis,
+  // so a floor-to-ceiling snap is a clean head-over-heels loop instead of a spin.
+  function alignmentArc(from, to, out) {
+    const d = from.dot(to);
+    if (d > 0.999999) return out.identity();
+    if (d < -0.999999) {
+      const axis = V4.copy(AX_X).applyQuaternion(player.body);
+      axis.addScaledVector(from, -axis.dot(from));
+      if (axis.lengthSq() < 1e-6) axis.set(0, 0, 1).cross(from);
+      return out.setFromAxisAngle(axis.normalize(), Math.PI);
+    }
+    return out.setFromUnitVectors(from, to);
+  }
+
+  function makeCheckpoint() {
+    return { position: player.position.clone(), gravity: player.gravity.clone(), body: player.body.clone(), pitch: player.pitch };
+  }
+  function restoreFrom(cp) {
+    player.position.copy(cp.position);
+    player.gravity.copy(cp.gravity);
+    player.body.copy(cp.body);
+    player.pitch = cp.pitch;
+    player.velocity.set(0, 0, 0);
+    player.grounded = false;
+    player.coyote = player.jumpBuffer = player.snapCooldown = 0;
+    releaseTether(false);
+    viewOffset.identity();
+    shake.amp = 0; impact = 0;
+  }
+
+  // ===========================================================================
+  // 5. RUN STATE, HUD
+  // ===========================================================================
+  const run = { time: 0, started: false, finished: false, next: 0, best: null, falls: 0, splits: [] };
+  try { const b = parseFloat(localStorage.getItem("orbitFlowBestV2")); if (b > 0) run.best = b; } catch (_) {}
+
+  function resetRun() {
+    player.position.copy(SPAWN);
+    player.gravity.set(0, -CFG.gravity, 0);
+    player.body.identity();
+    player.pitch = -0.25;
+    checkpoint = makeCheckpoint();
+    restoreFrom(checkpoint);
+    run.time = 0; run.started = false; run.finished = false; run.next = 0; run.falls = 0; run.splits = [];
+    gates.forEach(g => { g.group.visible = true; });
+    updateHud(true);
+  }
+
+  function fmt(t) {
+    const m = Math.floor(t / 60), s = t - m * 60;
+    return String(m).padStart(2, "0") + ":" + s.toFixed(2).padStart(5, "0");
+  }
+  function axisLabel(g) {
+    const ax = Math.abs(g.x), ay = Math.abs(g.y), az = Math.abs(g.z);
+    if (ax >= ay && ax >= az) return (g.x < 0 ? "−" : "+") + "X";
+    if (ay >= az) return (g.y < 0 ? "−" : "+") + "Y";
+    return (g.z < 0 ? "−" : "+") + "Z";
+  }
+  function stateLabel() { return player.tether.active ? "TETHERED" : player.grounded ? "GROUNDED" : "AIRBORNE"; }
+
+  let hudTick = 0;
+  function updateHud(force) {
+    if (!force && (hudTick++ % 2)) return;
+    const speed = player.velocity.length();
+    $("speed").textContent = speed.toFixed(1);
+    $("speedbar").style.width = Math.min(100, speed / CFG.terminalSpeed * 100).toFixed(1) + "%";
+    $("gdir").textContent = axisLabel(player.gravity);
+    const st = stateLabel(), stEl = $("state");
+    stEl.textContent = st; stEl.className = st === "TETHERED" ? "tethered" : st === "GROUNDED" ? "grounded" : "";
+    $("timer").textContent = fmt(run.time);
+    $("gates").textContent = run.next + "/" + gates.length;
+    $("next").textContent = run.next < gates.length ? Math.round(player.position.distanceTo(gates[run.next].pos)) + " m" : "--";
+    $("best").textContent = run.best ? fmt(run.best) : "--";
+    $("falls").textContent = run.falls;
+    $("chamber").textContent = player.position.z < -195 ? "Chamber 02 · Inversion" : "Chamber 01 · The Drop";
+  }
+
+  let toastTimer = 0;
+  function toast(text) { const t = $("toast"); t.textContent = text; t.classList.add("on"); toastTimer = 0.7; }
+  let crossTimer = 0;
+  function pulseCrosshair(kind) { const c = $("crosshair"); c.classList.remove("lock", "miss"); c.classList.add(kind); crossTimer = 0.25; }
+
+  // ===========================================================================
+  // 6. INPUT — pointer lock mouse-look, keys, snap and tether triggers
+  // ===========================================================================
+  const keys = Object.create(null);
+  let locked = false, fallbackLook = false, dragging = false, dragDist = 0, playing = false;
+
+  window.addEventListener("keydown", e => {
+    if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
+    if (e.repeat) return;
+    keys[e.code] = true;
+    if (!playing) return;
+    if (e.code === "Space") player.jumpBuffer = CFG.jumpBuffer;
+    if (e.code === "KeyE") gravitySnap();
+    if (e.code === "KeyQ") attachTether();
+    if (e.code === "KeyR") { resetRun(); toast("RESTART"); }
+  });
+  window.addEventListener("keyup", e => {
+    keys[e.code] = false;
+    if (e.code === "KeyQ") releaseTether(false);
+  });
+  window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; releaseTether(false); });
+
+  function look(dx, dy, sens = CFG.mouseSens) {
+    if (Math.abs(dx) > 400 || Math.abs(dy) > 400) return;   // ignore the jump some browsers send when the lock engages
+    Q1.setFromAxisAngle(AX_Y, -dx * sens);
+    player.body.multiply(Q1).normalize();                    // yaw around the body's own up
+    player.pitch = Math.max(-CFG.maxPitch, Math.min(CFG.maxPitch, player.pitch - dy * sens));
+  }
+
+  function requestLock() {
+    const tryLock = opts => {
+      try { const p = canvas.requestPointerLock(opts); return p && p.then ? p : Promise.resolve(); }
+      catch (err) { return Promise.reject(err); }
+    };
+    tryLock({ unadjustedMovement: true }).catch(() => tryLock()).catch(() => enableFallback());
+  }
+  function enableFallback() { fallbackLook = true; startPlaying(); }
+  function startPlaying() { playing = true; $("overlay").hidden = true; }
+
+  // Touch taps skip pointer lock; a mouse click asks for it.
+  let overlayPointer = "mouse";
+  $("overlay").addEventListener("pointerdown", e => { overlayPointer = e.pointerType || "mouse"; });
+  function resumeFromOverlay() {
+    if (run.finished) resetRun();
+    if (overlayPointer !== "mouse") { markTouch(); goFullscreen(); startPlaying(); return; }
+    if (fallbackLook) { startPlaying(); return; }
+    requestLock();
+  }
+  $("overlay").addEventListener("click", resumeFromOverlay);
+  $("restartBtn").addEventListener("click", e => { e.stopPropagation(); resetRun(); resumeFromOverlay(); });
+  function goFullscreen() {
+    const el = document.documentElement;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!fn || document.fullscreenElement || document.webkitFullscreenElement) return;
+    try { const r = fn.call(el); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+  }
+  document.addEventListener("pointerlockchange", () => {
+    locked = document.pointerLockElement === canvas;
+    if (locked) startPlaying();
+    else if (!fallbackLook && !run.finished) showPause();
+  });
+  document.addEventListener("pointerlockerror", enableFallback);
+
+  // Touch screens also fire imitation mouse events after a tap; ignore those.
+  let lastTouch = -1e9;
+  function markTouch() { lastTouch = performance.now(); document.body.classList.add("touch"); }
+  const fromTouch = () => performance.now() - lastTouch < 900;
+
+  window.addEventListener("mousemove", e => {
+    if (fromTouch()) return;
+    if (locked) look(e.movementX, e.movementY);
+    else if (fallbackLook && dragging) { look(e.movementX, e.movementY); dragDist += Math.abs(e.movementX) + Math.abs(e.movementY); }
+  });
+  canvas.addEventListener("mousedown", e => {
+    if (!playing || fromTouch()) return;
+    if (e.button === 0) {
+      if (locked) gravitySnap();
+      else if (fallbackLook) { dragging = true; dragDist = 0; }
+    } else if (e.button === 2) attachTether();
+  });
+  window.addEventListener("mouseup", e => {
+    if (e.button === 2) releaseTether(false);
+    if (e.button === 0 && dragging) { dragging = false; if (dragDist < 5) gravitySnap(); }
+  });
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+  // ---- Touch: drag anywhere to look, floating joystick to move, action buttons, pause ----
+  const touchMove = { x: 0, y: 0 };
+  let touchSprint = false;
+
+  let lookId = null, lookX = 0, lookY = 0;
+  canvas.addEventListener("pointerdown", e => {
+    if (e.pointerType === "mouse") return;
+    markTouch();
+    if (!playing || lookId !== null) return;
+    lookId = e.pointerId; lookX = e.clientX; lookY = e.clientY;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (e.pointerId !== lookId) return;
+    look(e.clientX - lookX, e.clientY - lookY, CFG.touchLookSens);
+    lookX = e.clientX; lookY = e.clientY;
+  });
+  const endLook = e => { if (e.pointerId === lookId) lookId = null; };
+  canvas.addEventListener("pointerup", endLook);
+  canvas.addEventListener("pointercancel", endLook);
+
+  const zone = $("movezone"), stickBase = $("stickbase"), stickKnob = $("stickknob"), STICK_R = 58;
+  let moveId = null, stickX = 0, stickY = 0;
+  function setStick(e) {
+    let dx = e.clientX - stickX, dy = e.clientY - stickY;
+    const d = Math.hypot(dx, dy);
+    if (d > STICK_R) { dx *= STICK_R / d; dy *= STICK_R / d; }
+    stickKnob.style.transform = "translate(" + dx + "px," + dy + "px)";
+    if (d / STICK_R < 0.15) { touchMove.x = touchMove.y = 0; return; }   // small dead zone
+    touchMove.x = dx / STICK_R; touchMove.y = dy / STICK_R;
+  }
+  function resetStick() {
+    moveId = null; touchMove.x = touchMove.y = 0;
+    stickKnob.style.transform = ""; stickBase.style.left = ""; stickBase.style.top = "";
+    stickBase.classList.remove("active");
+  }
+  zone.addEventListener("pointerdown", e => {
+    e.preventDefault(); markTouch();
+    if (!playing || moveId !== null) return;
+    moveId = e.pointerId;
+    try { zone.setPointerCapture(e.pointerId); } catch (_) {}
+    stickX = e.clientX; stickY = e.clientY;                    // the stick appears under your thumb
+    stickBase.style.left = stickX + "px"; stickBase.style.top = stickY + "px";
+    stickBase.classList.add("active");
+    setStick(e);
+  });
+  zone.addEventListener("pointermove", e => { if (e.pointerId === moveId) setStick(e); });
+  zone.addEventListener("pointerup", e => { if (e.pointerId === moveId) resetStick(); });
+  zone.addEventListener("pointercancel", e => { if (e.pointerId === moveId) resetStick(); });
+
+  const snapBtn = document.querySelector("#tbtns .snap");
+  document.querySelectorAll("#tbtns .tb").forEach(btn => {
+    const act = btn.dataset.act;
+    btn.addEventListener("pointerdown", e => {
+      e.preventDefault(); markTouch();
+      if (!playing) return;
+      try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+      btn.classList.add("on");
+      if (act === "snap") gravitySnap();
+      else if (act === "jump") player.jumpBuffer = CFG.jumpBuffer;
+      else if (act === "tether") attachTether();
+      else if (act === "sprint") { touchSprint = !touchSprint; btn.classList.toggle("lit", touchSprint); }
+    });
+    const up = () => { btn.classList.remove("on"); if (act === "tether") releaseTether(false); };
+    btn.addEventListener("pointerup", up);
+    btn.addEventListener("pointercancel", up);
+    btn.addEventListener("contextmenu", e => e.preventDefault());
+  });
+  $("pausebtn").addEventListener("click", () => { if (playing) showPause(); });
+
+  // Stop Safari pinch-zoom and page bounce while playing; pause when the app is switched away.
+  document.addEventListener("gesturestart", e => e.preventDefault());
+  document.addEventListener("touchmove", e => { if (playing) e.preventDefault(); }, { passive: false });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden || !playing) return;
+    if (document.pointerLockElement) document.exitPointerLock(); else showPause();
+  });
+
+  function showPause() {
+    playing = false;
+    releaseTether(false);
+    resetStick(); lookId = null;
+    $("eyebrow").textContent = "Paused";
+    $("headline").className = "";
+    $("headline").innerHTML = "Orbit <span>Flow</span>";
+    $("blurb").innerHTML = "Your run is frozen exactly where you left it. <strong>" + TAP() + " to resume.</strong>";
+    $("controls").hidden = false; $("splits").hidden = true;
+    $("go").textContent = TAP() + " to resume";
+    $("restartBtn").hidden = false;
+    $("overlay").hidden = false;
+  }
+
+  // ===========================================================================
+  // 7. GRAVITY SNAP — raycast + quaternion momentum translation
+  // ===========================================================================
+  const raycaster = new THREE.Raycaster();
+  let hoverMesh = null;
+
+  function aimRay(range) {
+    camera.getWorldPosition(V1);
+    camera.getWorldDirection(V2);
+    raycaster.set(V1, V2);
+    raycaster.far = range;
+    const hits = raycaster.intersectObjects(solidMeshes, false);
+    return hits.length ? hits[0] : null;
+  }
+
+  function gravitySnap() {
+    if (player.snapCooldown > 0) return;
+    const hit = aimRay(CFG.snapRange);
+    if (!hit || !hit.face) { pulseCrosshair("miss"); return; }
+
+    const newUp = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+    const oldUp = getUp(new THREE.Vector3());
+    if (oldUp.angleTo(newUp) < CFG.minSnapAngle) { pulseCrosshair("miss"); return; }
+
+    // Where the player is looking, captured before anything rotates.
+    const lookForward = camera.getWorldDirection(new THREE.Vector3());
+    const incomingSpeed = player.velocity.length();
+
+    // 1. Quaternion that carries the old gravity frame onto the new surface.
+    const R = alignmentArc(oldUp, newUp, new THREE.Quaternion());
+
+    // 2. Rotate the incoming velocity into the new frame.
+    const rotated = player.velocity.clone().applyQuaternion(R);
+
+    // 3. Split it against the new surface plane.
+    const normalComponent = rotated.dot(newUp);
+    const tangential = rotated.addScaledVector(newUp, -normalComponent);
+
+    // 4. Aim direction on the new surface.
+    const aim = lookForward.addScaledVector(newUp, -lookForward.dot(newUp));
+    if (aim.lengthSq() < 1e-6) {
+      aim.copy(AX_NZ).applyQuaternion(player.body).applyQuaternion(R);
+      aim.addScaledVector(newUp, -aim.dot(newUp));
+    }
+    if (aim.lengthSq() < 1e-6) aim.copy(AX_X).applyQuaternion(player.body).cross(newUp);
+    aim.normalize();
+
+    // 5. The plummet (perpendicular part) becomes a sprint along the aim; the sideways part is kept.
+    const redirected = tangential.addScaledVector(aim, Math.abs(normalComponent));
+    if (redirected.lengthSq() < 1e-8) redirected.copy(aim);
+
+    // 6. 100% of the incoming magnitude is kept, including terminal velocity. Nothing is subtracted.
+    const outgoingSpeed = Math.max(incomingSpeed, CFG.snapSpeedFloor);
+    player.velocity.copy(redirected.normalize().multiplyScalar(outgoingSpeed));
+
+    // 7. Body and gravity switch instantly. The body is also turned (around the new up) to face the
+    //    sprint direction, so W keeps driving you the way you are already flying.
+    const oldBody = Q1.copy(player.body);
+    player.body.premultiply(R).normalize();
+    const bodyForward = V3.copy(AX_NZ).applyQuaternion(player.body);
+    const sprintDir = V4.copy(player.velocity).addScaledVector(newUp, -player.velocity.dot(newUp));
+    if (sprintDir.lengthSq() > 1e-6) {
+      sprintDir.normalize();
+      const yaw = Math.atan2(V2.copy(bodyForward).cross(sprintDir).dot(newUp), bodyForward.dot(sprintDir));
+      player.body.premultiply(Q2.setFromAxisAngle(newUp, yaw)).normalize();
+    }
+    player.gravity.copy(newUp).multiplyScalar(-CFG.gravity);
+    player.grounded = false;
+    player.coyote = 0;
+    player.snapCooldown = CFG.snapCooldown;
+    if (player.tether.active) releaseTether(false);
+
+    // ...but the view holds exactly where it was, then slerps into the new up (anti-motion-sickness).
+    //    viewOffset' = viewOffset · oldBody · newBody⁻¹  keeps the on-screen image identical on this frame.
+    viewOffset.multiply(oldBody).multiply(Q2.copy(player.body).invert()).normalize();
+
+    // Juice: impact shake + chromatic punch
+    shake.amp = Math.max(shake.amp, 0.1 + Math.min(0.35, outgoingSpeed / 220));
+    impact = 1;
+    pulseCrosshair("lock");
+    run.started = true;
+  }
+
+  // ===========================================================================
+  // 8. TETHER — centrifugal swing around an anchor
+  // ===========================================================================
+  function attachTether() {
+    if (!playing || run.finished) return;
+    const hit = aimRay(CFG.tetherRange);
+    if (!hit) { pulseCrosshair("miss"); return; }
+    const t = player.tether;
+    t.active = true;
+    t.anchor.copy(hit.point);
+    t.length = Math.max(CFG.tetherMinLength, player.position.distanceTo(hit.point));
+    t.centrifugal = 0;
+    rope.visible = true; anchorMark.visible = true;
+    anchorMark.position.copy(hit.point);
+    run.started = true;
+  }
+  function releaseTether(boost) {
+    const t = player.tether;
+    if (!t.active) return;
+    t.active = false; t.centrifugal = 0;
+    rope.visible = false; anchorMark.visible = false;
+    if (boost) player.velocity.addScaledVector(getUp(V1), CFG.jumpSpeed * CFG.tetherReleaseBoost);
+  }
+
+  // ===========================================================================
+  // 9. PHYSICS STEP
+  // ===========================================================================
+  const up = new THREE.Vector3(), wish = new THREE.Vector3(), lateral = new THREE.Vector3(), accel = new THREE.Vector3();
+
+  function lateralControl(lat, wishDir, target, acc, friction, decay, steer, dt) {
+    const speed = lat.length();
+    const hasWish = wishDir.lengthSq() > 1e-6;
+    if (speed > target + 0.01) {
+      // Momentum mode: keep the speed, let input steer it, bleed it off only slowly.
+      const dir = V3.copy(lat).divideScalar(speed);
+      if (hasWish) {
+        dir.lerp(wishDir, Math.min(1, steer * dt));
+        if (dir.lengthSq() > 1e-6) dir.normalize(); else dir.copy(lat).divideScalar(speed);
+      }
+      const newSpeed = Math.max(target, speed - (hasWish ? decay : decay * 2) * dt);
+      return lat.copy(dir).multiplyScalar(newSpeed);
+    }
+    const goal = V3.copy(wishDir).multiplyScalar(target);
+    const rate = (hasWish ? acc : friction) * dt;
+    const diff = goal.sub(lat), dl = diff.length();
+    if (dl <= rate || dl < 1e-6) return lat.add(diff);
+    return lat.addScaledVector(diff, rate / dl);
+  }
+
+  function computeWish() {
+    const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - touchMove.y;
+    const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + touchMove.x;
+    wish.set(0, 0, 0);
+    if (!f && !r) return wish;
+    wish.addScaledVector(V1.copy(AX_NZ).applyQuaternion(player.body), f);
+    wish.addScaledVector(V2.copy(AX_X).applyQuaternion(player.body), r);
+    wish.addScaledVector(up, -wish.dot(up));
+    return wish.lengthSq() > 1e-6 ? wish.normalize() : wish.set(0, 0, 0);
+  }
+
+  function collide() {
+    const p = player.position, v = player.velocity, r = CFG.radius;
+    player.grounded = false;
+    for (let pass = 0; pass < 2; pass++) {
+      for (const b of solids) {
+        const cx = Math.max(b.min.x, Math.min(p.x, b.max.x));
+        const cy = Math.max(b.min.y, Math.min(p.y, b.max.y));
+        const cz = Math.max(b.min.z, Math.min(p.z, b.max.z));
+        let nx = p.x - cx, ny = p.y - cy, nz = p.z - cz;
+        const d2 = nx * nx + ny * ny + nz * nz;
+        if (d2 >= r * r) continue;
+        let pen;
+        if (d2 > 1e-10) {
+          const d = Math.sqrt(d2); nx /= d; ny /= d; nz /= d; pen = r - d;
+        } else {
+          const ex = [p.x - b.min.x, b.max.x - p.x, p.y - b.min.y, b.max.y - p.y, p.z - b.min.z, b.max.z - p.z];
+          let k = 0; for (let i = 1; i < 6; i++) if (ex[i] < ex[k]) k = i;
+          nx = k === 0 ? -1 : k === 1 ? 1 : 0; ny = k === 2 ? -1 : k === 3 ? 1 : 0; nz = k === 4 ? -1 : k === 5 ? 1 : 0;
+          pen = ex[k] + r;
+        }
+        p.x += nx * pen; p.y += ny * pen; p.z += nz * pen;
+        const vn = v.x * nx + v.y * ny + v.z * nz;
+        if (vn < 0) { v.x -= nx * vn; v.y -= ny * vn; v.z -= nz * vn; }
+        if (nx * up.x + ny * up.y + nz * up.z > 0.65) player.grounded = true;
+      }
+    }
+  }
+
+  function tetherStep(dt) {
+    const t = player.tether;
+    accel.copy(player.gravity).multiplyScalar(CFG.gravityScale).addScaledVector(wish, CFG.tetherSwingAccel);
+    const toPlayer = V1.copy(player.position).sub(t.anchor);
+    const dist = toPlayer.length();
+    if (dist > 1e-3 && dist >= t.length - 1e-3) {
+      const outward = toPlayer.divideScalar(dist);
+      const radialSpeed = player.velocity.dot(outward);
+      const tangential = V2.copy(player.velocity).addScaledVector(outward, -radialSpeed);
+      t.centrifugal = tangential.lengthSq() / dist;                    // v² / r
+      const outwardPull = accel.dot(outward) + t.centrifugal;
+      if (outwardPull > 0) accel.addScaledVector(outward, -outwardPull); // tension → centripetal
+      if (radialSpeed > 0) player.velocity.addScaledVector(outward, -radialSpeed);
+      const stretch = dist - t.length;
+      if (stretch > 0) player.velocity.addScaledVector(outward, -Math.min(stretch * CFG.tetherCorrection, stretch / dt));
+    } else {
+      t.centrifugal = 0;
+    }
+    player.velocity.addScaledVector(accel, dt);
+  }
+
+  function physicsStep(dt) {
+    getUp(up);
+    player.snapCooldown = Math.max(0, player.snapCooldown - dt);
+    player.coyote = player.grounded ? CFG.coyoteTime : Math.max(0, player.coyote - dt);
+    player.jumpBuffer = Math.max(0, player.jumpBuffer - dt);
+    computeWish();
+
+    if (player.tether.active) {
+      if (player.jumpBuffer > 0) { player.jumpBuffer = 0; releaseTether(true); }
+      else tetherStep(dt);
+    }
+
+    if (!player.tether.active) {
+      const target = keys.ShiftLeft || keys.ShiftRight || touchSprint ? CFG.sprintSpeed : CFG.runSpeed;
+      let vSpeed = player.velocity.dot(up);
+      lateral.copy(player.velocity).addScaledVector(up, -vSpeed);
+      if (player.grounded) {
+        if (vSpeed < 0) vSpeed = 0;
+        lateralControl(lateral, wish, target, CFG.groundAccel, CFG.groundFriction, CFG.groundMomentumDecay, CFG.groundSteer, dt);
+      } else {
+        lateralControl(lateral, wish, target, CFG.airAccel, 0, CFG.airMomentumDecay, CFG.airSteer, dt);
+      }
+      if (player.jumpBuffer > 0 && player.coyote > 0) {
+        vSpeed = CFG.jumpSpeed; player.jumpBuffer = 0; player.coyote = 0; player.grounded = false;
+        run.started = true;
+      }
+      player.velocity.copy(lateral).addScaledVector(up, vSpeed);
+      // Apply the personal gravity vector every step.
+      player.velocity.addScaledVector(player.gravity, CFG.gravityScale * dt);
+      const fall = -player.velocity.dot(up);
+      if (fall > CFG.terminalSpeed) player.velocity.addScaledVector(up, fall - CFG.terminalSpeed);
+    }
+
+    player.position.addScaledVector(player.velocity, dt);
+    collide();
+
+    if (!run.started && player.position.distanceToSquared(SPAWN) > 2) run.started = true;
+    if (run.started && !run.finished) run.time += dt;
+    checkGates();
+
+    const p = player.position;
+    if (p.y < -80 || p.y > 230 || Math.abs(p.x) > 260 || p.z > 140 || p.z < -470) {
+      run.falls++;
+      restoreFrom(checkpoint);
+      toast("CHECKPOINT");
+    }
+  }
+
+  function checkGates() {
+    if (run.finished) return;
+    const g = gates[run.next];
+    if (player.position.distanceTo(g.pos) < g.r) {
+      run.splits.push(run.time);
+      g.group.visible = false;
+      run.next++;
+      checkpoint = makeCheckpoint();
+      impact = Math.max(impact, 0.6);
+      if (run.next >= gates.length) finishRun();
+      else toast("GATE " + String(run.next).padStart(2, "0") + " · " + fmt(run.time));
+    }
+  }
+
+  function finishRun() {
+    run.finished = true;
+    releaseTether(false);
+    const isBest = !run.best || run.time < run.best;
+    if (isBest) { run.best = run.time; try { localStorage.setItem("orbitFlowBestV2", String(run.time)); } catch (_) {} }
+    if (document.pointerLockElement) document.exitPointerLock();
+    playing = false;
+    $("eyebrow").textContent = isBest ? "Run complete · new best" : "Run complete";
+    $("headline").className = "time";
+    $("headline").textContent = fmt(run.time);
+    $("blurb").innerHTML = isBest
+      ? "All six gates cleared. <strong>That's your fastest run.</strong>"
+      : "All six gates cleared. Your best stays at <strong>" + fmt(run.best) + "</strong>.";
+    $("controls").hidden = true;
+    const sp = $("splits");
+    sp.innerHTML = run.splits.map((t, i) => "<div>Gate " + String(i + 1).padStart(2, "0") + "<b>" + fmt(t) + "</b></div>").join("");
+    sp.hidden = false;
+    $("go").textContent = TAP() + " to run again";
+    $("restartBtn").hidden = true;
+    resetStick(); lookId = null;
+    $("overlay").hidden = false;
+    updateHud(true);
+  }
+
+  // ===========================================================================
+  // 10. FRAME LOOP — camera smoothing, shake, FOV warp, render
+  // ===========================================================================
+  const pitchQ = new THREE.Quaternion(), visualUp = new THREE.Vector3();
+  let debugFrozen = false;
+  let last = performance.now(), acc = 0, clock = 0;
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now; clock += dt;
+
+    if (playing && !run.finished && !debugFrozen) {
+      acc += dt;
+      let steps = 0;
+      while (acc >= CFG.fixedDt && steps < CFG.maxSteps) { physicsStep(CFG.fixedDt); acc -= CFG.fixedDt; steps++; }
+      if (steps === CFG.maxSteps) acc = 0;
+    }
+
+    // Anti-motion-sickness: slerp the leftover tilt to identity so the world rolls into the new up.
+    if (viewOffset.angleTo(IDENTITY) > 0.0005) viewOffset.slerp(IDENTITY, 1 - Math.exp(-dt * 4.6 / CFG.cameraSettle)).normalize();
+    else viewOffset.identity();
+
+    pitchQ.setFromAxisAngle(AX_X, player.pitch);
+    rig.quaternion.copy(viewOffset).multiply(player.body).multiply(pitchQ);
+    getUp(visualUp).applyQuaternion(viewOffset);
+    rig.position.copy(player.position).addScaledVector(visualUp, CFG.eyeHeight);
+
+    // Impact shake: high-frequency, decaying, in the camera's local space.
+    shake.t += dt;
+    shake.amp *= Math.exp(-dt * CFG.shakeDecay);
+    if (shake.amp < 0.001) shake.amp = 0;
+    const a = shake.amp, t = shake.t;
+    camera.position.set(
+      (Math.sin(t * 71.0) + 0.5 * Math.sin(t * 113.0 + 1.7)) * a,
+      (Math.sin(t * 89.0 + 0.9) + 0.5 * Math.sin(t * 131.0 + 2.3)) * a,
+      Math.sin(t * 59.0 + 0.3) * a * 0.4
+    );
+    camera.rotation.z = Math.sin(t * 97.0) * a * 0.05;
+
+    // High-speed FOV warp: 75 → 95 as speed climbs.
+    const speed = player.velocity.length();
+    const speed01 = Math.min(1, Math.max(0, (speed - CFG.runSpeed) / (CFG.fovFullSpeed - CFG.runSpeed)));
+    const fovTarget = CFG.fovBase + (CFG.fovMax - CFG.fovBase) * speed01;
+    camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * 6);
+    camera.updateProjectionMatrix();
+    rig.updateMatrixWorld(true);
+
+    impact *= Math.exp(-dt * 6);
+    for (const m of gridMaterials) { m.uniforms.uTime.value = clock; m.uniforms.uSpeed.value = speed01; }
+    if (speedPass) { speedPass.uniforms.uSpeed.value = speed01; speedPass.uniforms.uImpact.value = impact; }
+    if (bloomPass) bloomPass.strength = 1.05 + speed01 * 0.35 + impact * 0.5;
+
+    // Crosshair: highlight what a snap would hit, and show its range
+    const hit = playing ? aimRay(CFG.snapRange) : null;
+    const mesh = hit ? hit.object : null;
+    if (mesh !== hoverMesh) {
+      if (hoverMesh) hoverMesh.material.uniforms.uHover.value = 0;
+      if (mesh) mesh.material.uniforms.uHover.value = 1;
+      hoverMesh = mesh;
+    }
+    $("range").textContent = hit ? Math.round(hit.distance) + " M" : "";
+    snapBtn.classList.toggle("ready", !!mesh);
+    crossTimer -= dt;
+    if (crossTimer <= 0) { const c = $("crosshair"); c.classList.remove("miss"); c.classList.toggle("lock", !!mesh); }
+    toastTimer -= dt;
+    if (toastTimer <= 0) $("toast").classList.remove("on");
+
+    // Tether rope
+    if (player.tether.active) {
+      const pos = ropeGeo.attributes.position;
+      pos.setXYZ(0, player.position.x, player.position.y, player.position.z);
+      pos.setXYZ(1, player.tether.anchor.x, player.tether.anchor.y, player.tether.anchor.z);
+      pos.needsUpdate = true;
+      anchorMark.rotation.y += dt * 4;
+    }
+
+    // Gates: the next one burns amber, later ones idle in cyan
+    gates.forEach((g, i) => {
+      if (!g.group.visible) return;
+      const isNext = i === run.next;
+      const col = isNext ? 0xffc24a : 0x2ef2ff;
+      g.ringMat.color.setHex(col);
+      g.ringMat.opacity = isNext ? 1 : 0.35;
+      g.disc.material.uniforms.uColor.value.setHex(col);
+      g.disc.material.uniforms.uOpacity.value = isNext ? 1 : 0.35;
+      g.disc.material.uniforms.uTime.value = clock;
+      g.label.material.opacity = isNext ? 1 : 0.4;
+      g.ring.rotation.z += dt * (isNext ? 1.6 : 0.5);
+      g.ring2.rotation.z -= dt * (isNext ? 2.4 : 0.7);
+      g.group.scale.setScalar(isNext ? 1 + Math.sin(clock * 5) * 0.05 : 1);
+    });
+
+    updateHud(false);
+    if (composer) composer.render(); else renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  resetRun();
+  $("go").textContent = TAP() + " to play";
+  requestAnimationFrame(frame);
+  // Developer console helpers, e.g. __orbitFlow.aimAt(-20, 30, -60)
+  function aimAt(x, y, z) {
+    const u = getUp(new THREE.Vector3());
+    const d = new THREE.Vector3(x, y, z).sub(rig.position).normalize();
+    const f = d.clone().addScaledVector(u, -d.dot(u));
+    if (f.lengthSq() < 1e-6) return;
+    f.normalize();
+    const right = f.clone().cross(u).normalize();
+    player.body.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, u, f.clone().negate()));
+    player.pitch = Math.asin(Math.max(-1, Math.min(1, d.dot(u))));
+    viewOffset.identity();
+    rig.quaternion.copy(player.body).multiply(pitchQ.setFromAxisAngle(AX_X, player.pitch));
+    rig.updateMatrixWorld(true);
+  }
+  // Deterministic stepping for testing: __orbitFlow.freeze(true); __orbitFlow.simulate(1.5)
+  function simulate(seconds) {
+    const n = Math.round(seconds / CFG.fixedDt);
+    for (let i = 0; i < n && !run.finished; i++) physicsStep(CFG.fixedDt);
+    viewOffset.identity();
+    rig.quaternion.copy(player.body).multiply(pitchQ.setFromAxisAngle(AX_X, player.pitch));
+    rig.position.copy(player.position).addScaledVector(getUp(visualUp), CFG.eyeHeight);
+    camera.position.set(0, 0, 0);
+    rig.updateMatrixWorld(true);
+  }
+  window.__orbitFlow = { player, run, CFG, gravitySnap, attachTether, releaseTether, aimAt, simulate, freeze: v => { debugFrozen = !!v; }, keys };
+})();
+</script>
+
+</body>
+</html>
